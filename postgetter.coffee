@@ -1,6 +1,8 @@
 {Config} = require './config'
-{Post} = require './post'
+{HNPost} = require './hnpost'
 {EventEmitter} = require 'events'
+
+date = require './date'
 
 jsdom = require 'jsdom'
 request = require 'request'
@@ -36,7 +38,7 @@ exports.Postgetter = class Postgetter extends EventEmitter
 
     # This will be triggered when there are enough unique raw titles
     @on 'got posts', ->
-      console.log 'We have the right amount of posts' if @logging
+      console.log "We have the right amount of posts (#{@unProcessedPosts.length})" if @logging
 
       # Process the post titles into Post objects
       @processPosts()
@@ -66,41 +68,83 @@ exports.Postgetter = class Postgetter extends EventEmitter
             # Load any extra scripts
             scripts: ['http://code.jquery.com/jquery-latest.js']
             }, (err, window) =>
+              console.log "jQuerying out the content" if @logging
               # Assign jQuery to the dollar
               $ = window.jQuery
 
               # This array will hold the raw titles 
               content = []
-
-              # The "a" elements holding the post titles
-              # also including the "More" link
-              htmlContent = ($ '.title a')
+              
+              htmlContent = ($ $('td')[4]).find 'table tr'
 
               # Get the "More" link and cut it from the array
               # Then get the "href" attribute and replace slashes with nothing
-              lastItem = htmlContent.splice(htmlContent.length - 1)
-              @nextPage = $(lastItem).attr('href').replace(Config.slashRegEx, '')
+              lastItem = htmlContent.splice htmlContent.length - 1
+              moreLink = ($ lastItem).find('a').attr 'href'
+              @nextPage = moreLink.replace Config.slashRegEx, ''
+              console.log "The next page is: #{@nextPage}" if @logging
+              # Splice of an extra tr to get rid of some layout stuff
+              htmlContent.splice htmlContent.length - 1
 
-              # Loop through all the "a" elements and
-              # add the title to the contents array
-              htmlContent.each (key, value) ->
-                content.push value.innerHTML
+              counter = 0
+              currentPost = {}
 
+              htmlContent.each (key, value) =>
+
+                pagePart = ($ value)
+                
+                if counter is 0
+
+                  currentPost.title = pagePart.find('.title a').html()
+                  currentPost.url = pagePart.find('.title a').attr 'href'
+                  currentPost.domain = pagePart.find('.comhead').html()?.match(Config.comheadRegEx)[1]
+                  
+                  if typeof currentPost.domain isnt 'string'
+                    currentPost.domain = "news.ycombinator.com"
+                  
+                  counter += 1
+                  
+
+                else if counter is 1
+                  
+                  if pagePart.find('span').html()
+                    pointText = pagePart.find('span').html()
+                    currentPost.numOfVotes = pointText.match(Config.pointsRegEx)[1]
+                    currentPost.post_user = pagePart.find('a')[0].innerHTML
+                    currentPost.date_posted = Date.parse pagePart.find('.subtext').html().match(Config.postDateRegEx)[1]
+
+                    commentText = pagePart.find('a')[1].innerHTML
+                    commentsMatch = commentText.match Config.commentsRegEx
+                    currentPost.numOfComments = if commentsMatch[2] then commentsMatch[2] else 0
+                  else 
+                    currentPost.numOfVotes = 0
+                    currentPost.post_user = "hackernews"
+                    currentPost.date_posted = Date.parse pagePart.find('.subtext').html()
+                    currentPost.numOfComments = 0
+
+                  counter += 1
+                  
+
+                else if counter is 2
+                  content.push currentPost
+                  currentPost = {}
+                  counter = 0
+                  
+                  
+              
               # Added the newly scraped post titles to the rest of the un-processed titles
               @unProcessedPosts = @unProcessedPosts.concat content
-
-              console.log @unProcessedPosts.length if @logging
 
               # This if statment checks to see if you have enough posts,
               # or need more, or have too many
               if @unProcessedPosts.length < @numOfPosts
-                console.log "We haven't got enough posts" if @logging
+                console.log "We haven't got enough posts (#{@unProcessedPosts.length})" if @logging
 
                 # Get more Posts
                 @getPosts()
 
               else if @unProcessedPosts.length > @numOfPosts
-                console.log "We have too many posts" if @logging
+                console.log "We have too many posts (#{@unProcessedPosts.length})" if @logging
 
                 # Get rid of unneeded titles
                 @cutPosts()
@@ -108,7 +152,7 @@ exports.Postgetter = class Postgetter extends EventEmitter
               else if @unProcessedPosts.length is @numOfPosts
                 # Tell us that we have the correct amount of titles and
                 # trigger the processing
-                @emit "got posts"
+                @emit 'got posts'
 
 
   # Private: Make the raw titles in "@unProcessedPosts" into Post objects
@@ -117,12 +161,13 @@ exports.Postgetter = class Postgetter extends EventEmitter
     console.log "Processing Posts" if @logging
     
     # Loop through all the titles and add Post objects to "@posts"
-    for title in @unProcessedPosts
-      @posts.push new Post title
+    for m_obj in @unProcessedPosts
+      @posts.push new HNPost m_obj
     
   # Private: Trim the size of the array to the requested number of posts
   #
   cutPosts: ->
+
     # Work out difference between the acctual number and the requested one
     diff = @unProcessedPosts.length - @numOfPosts
 
@@ -130,7 +175,7 @@ exports.Postgetter = class Postgetter extends EventEmitter
     @unProcessedPosts.splice(@unProcessedPosts.length - diff)
 
     # Now we have the correct amount of titles, tell the program
-    @emit "got posts"
+    @emit 'got posts'
 
 
   # Private: Get the next page of post title to process
@@ -139,7 +184,7 @@ exports.Postgetter = class Postgetter extends EventEmitter
     # Add the next page's dir to the url
     uri = 'http://news.ycombinator.com/' + @nextPage
 
-    console.log uri if @logging
+    console.log "Requesting #{uri}" if @logging
 
     # Request the page and send it to the processing function
     request {uri: uri}, (err, response, body) =>
